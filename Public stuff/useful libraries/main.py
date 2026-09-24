@@ -91,32 +91,32 @@ def DoUnknownColor():
 
 
 def DoLeftUp():
-    pass
+    print("left joystick up")
 
 
 
 def DoLeftDown():
-    pass
+    print("left joystick down")
 
 
 
 def DoLeftReleased():
-    pass
+    print("left joystick released")
 
 
 
 def DoRightUp():
-    pass
+    print("right joystick up")
 
 
 
 def DoRightDown():
-    pass
+    print("right joystick down")
 
 
 
 def DoRightReleased():
-    pass
+    print("right joystick released")
 
 
 
