@@ -35,6 +35,7 @@ def DoRed():
 
 def DoYellow():
     print(":(")
+    print("yay!")
     print("yellow")
 
 
