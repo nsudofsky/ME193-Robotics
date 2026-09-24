@@ -36,8 +36,8 @@ motor = doubleMotor()
 # Fill these in with whatever behavior you want.
 
 def DoRed():
-    """Red light: stop."""
-    motor.stop()
+    print("yayyy")
+    print("red")
 
 
 
