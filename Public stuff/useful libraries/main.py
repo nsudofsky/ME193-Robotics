@@ -8,7 +8,7 @@ Then copy lelib.py from the SimpleLE repo into this project's folder.
 import time
 
 import legoeducation as le
-from lelib import colorSensor, controller
+from lelib import colorSensor, controller, singleMotor
 
 # --- Bluetooth card info for your hardware -------------------------------
 # Fill these in with the color/serial printed on your LEGO connection card.
@@ -20,7 +20,17 @@ COLOR_SENSOR_CARD_SERIAL = 7552
 CONTROLLER_CARD_COLOR = le.LEGO_COLOR_ORANGE
 CONTROLLER_CARD_SERIAL = 7552
 
+SINGLE_MOTOR_CARD_COLOR = le.LEGO_COLOR_ORANGE
+SINGLE_MOTOR_CARD_SERIAL = 7552
+
 POLL_DELAY_S = 0.1  # seconds between reads
+
+motor = None  # set to a connected singleMotor in main()
+
+
+def beep():
+    """Beep the single motor's built-in speaker."""
+    motor.beep()
 
 
 
@@ -189,11 +199,16 @@ def handle_controller(ctl):
 # --- Main loop -------------------------------------------------------------
 
 def main():
+    global motor
+
     sensor = colorSensor()
     sensor.connect(card_serial=COLOR_SENSOR_CARD_SERIAL, card_color=COLOR_SENSOR_CARD_COLOR)
 
     ctl = controller()
     ctl.connect(card_serial=CONTROLLER_CARD_SERIAL, card_color=CONTROLLER_CARD_COLOR)
+
+    motor = singleMotor()
+    motor.connect(card_serial=SINGLE_MOTOR_CARD_SERIAL, card_color=SINGLE_MOTOR_CARD_COLOR)
 
     try:
         while True:
