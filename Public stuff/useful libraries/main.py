@@ -8,7 +8,7 @@ Then copy lelib.py from the SimpleLE repo into this project's folder.
 import time
 
 import legoeducation as le
-from lelib import colorSensor, controller
+from lelib import colorSensor, controller, doubleMotor
 
 # --- Bluetooth card info for your hardware -------------------------------
 # Fill these in with the color/serial printed on your LEGO connection card.
@@ -20,7 +20,15 @@ COLOR_SENSOR_CARD_SERIAL = 7552
 CONTROLLER_CARD_COLOR = le.LEGO_COLOR_ORANGE
 CONTROLLER_CARD_SERIAL = 7552
 
+MOTOR_CARD_COLOR = le.LEGO_COLOR_ORANGE
+MOTOR_CARD_SERIAL = 0999
+
+SLOW_SPEED = 25   # % speed on yellow
+FAST_SPEED = 60   # % speed on blue
+
 POLL_DELAY_S = 0.1  # seconds between reads
+
+motor = doubleMotor()
 
 
 
@@ -28,17 +36,20 @@ POLL_DELAY_S = 0.1  # seconds between reads
 # Fill these in with whatever behavior you want.
 
 def DoRed():
-    print("red")
+    """Red light: stop."""
+    motor.stop()
 
 
 
 def DoYellow():
-    print("yellow")
+    """Yellow light: creep forward slowly."""
+    motor.run(SLOW_SPEED)
 
 
 
 def DoBlue():
-    print("blue")
+    """Blue: drive forward at full cruising speed."""
+    motor.run(FAST_SPEED)
 
 
 
@@ -192,6 +203,8 @@ def main():
     ctl = controller()
     ctl.connect(card_serial=CONTROLLER_CARD_SERIAL, card_color=CONTROLLER_CARD_COLOR)
 
+    motor.connect(card_serial=MOTOR_CARD_SERIAL, card_color=MOTOR_CARD_COLOR)
+
     try:
         while True:
             handle_color(sensor.detect_color())
@@ -199,6 +212,8 @@ def main():
             time.sleep(POLL_DELAY_S)
     except KeyboardInterrupt:
         pass
+    finally:
+        motor.stop()
 
 
 
