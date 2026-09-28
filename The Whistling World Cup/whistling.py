@@ -5,12 +5,12 @@ The Whistling World Cup
 Sound-controlled LEGO car. A live microphone feed (captured with pyaudio)
 drives the car using a recorder (the instrument) and claps:
 
-    note 1 (lowest)   -> FORWARD, slowest
-    note 2            -> FORWARD, faster
-    note 3            -> FORWARD, fastest
-    note 4            -> REVERSE
-    note 5            -> LEFT
-    note 6 (highest)  -> RIGHT
+    note 1 (lowest)   -> FORWARD, slowest       (latched -- keeps going)
+    note 2            -> FORWARD, faster        (latched -- keeps going)
+    note 3            -> FORWARD, fastest       (latched -- keeps going)
+    note 4            -> REVERSE                (latched -- keeps going)
+    note 5            -> LEFT, a bounded 90 degree turn, then STOP
+    note 6 (highest)  -> RIGHT, a bounded 90 degree turn, then STOP
     two claps         -> STOP
 
 The 6 notes are whatever your recorder actually produces -- calibrated to
@@ -124,7 +124,9 @@ NOISE_FLOOR_K = 1.0        # noise floor = ambient_rms_mean + K * ambient_rms_st
 
 MIN_FORWARD_SPEED, MAX_FORWARD_SPEED = 30, 90  # note 1 (lowest) -> MIN, note SPEED_NOTE_COUNT -> MAX
 REVERSE_SPEED = 45          # fixed -- REVERSE is one note, not a range, so there's no pitch to vary it by
-TURN_SPEED = 55             # fixed tank-turn speed %% for LEFT/RIGHT, same reasoning
+TURN_SPEED = 55             # turn speed %% for the LEFT/RIGHT rotation below
+TURN_DEGREES = 90           # LEFT/RIGHT are a bounded turn-and-stop, not a continuous spin -- this many
+                            # degrees, via the IMU-confirmed movement_turn_for_degrees() (see audio_worker)
 
 # Claps: STOP. A clap is loud and broadband -- the opposite of a recorder
 # note's narrowband pitch -- so it's never confused with a note no matter
@@ -373,16 +375,17 @@ class ClapStopDetector:
 
 
 def apply_command(dm, command, forward_speed):
+    """Handles the *latched* commands -- STOP/FORWARD/REVERSE, each
+    re-issued every COMMAND_PERIOD_S for as long as they're current. LEFT/
+    RIGHT are NOT handled here: a turn is a bounded, one-shot action, fired
+    directly in audio_worker the instant its note commits, not something
+    to keep re-applying on a timer."""
     if command == "STOP":
         dm.movement_move_tank(0, 0)
     elif command == "FORWARD":
         dm.movement_move_tank(forward_speed, forward_speed)
     elif command == "REVERSE":
         dm.movement_move_tank(-REVERSE_SPEED, -REVERSE_SPEED)
-    elif command == "LEFT":
-        dm.movement_move_tank(-TURN_SPEED, TURN_SPEED)
-    elif command == "RIGHT":
-        dm.movement_move_tank(TURN_SPEED, -TURN_SPEED)
 
 
 # --------------------------------------------------------------------------
@@ -607,6 +610,10 @@ def audio_worker(state, dm, _mqtt_client, pa, device_index, stop_event, force_re
             _coarse_peak_freq, tonal, rms, _spectrum = classify_frame(state, samples)
             now = time.monotonic()
 
+            with state.lock:
+                start_received = state.start_received
+                game_over = state.game_over
+
             refined_freq = _refine_peak_freq(samples) if tonal else 0.0
             newly_committed = note_detector.update(tonal, refined_freq)
             if newly_committed is not None:
@@ -616,6 +623,23 @@ def audio_worker(state, dm, _mqtt_client, pa, device_index, stop_event, force_re
                     current_forward_speed = forward_speed_for_note(newly_committed)
                     print(f"note {newly_committed + 1}/{NOTE_COUNT} ({refined_freq:.0f} Hz) "
                           f"-> FORWARD @ {current_forward_speed:.0f}%")
+                elif resolved in ("LEFT", "RIGHT"):
+                    # A turn is a bounded, one-shot action -- not a state to
+                    # latch and keep re-issuing every COMMAND_PERIOD_S like
+                    # FORWARD/REVERSE/STOP are. Fire it once, right here,
+                    # then fall back to STOP so nothing keeps re-turning.
+                    print(f"note {newly_committed + 1}/{NOTE_COUNT} ({refined_freq:.0f} Hz) "
+                          f"-> {resolved} ({TURN_DEGREES}° turn)")
+                    if start_received and not game_over:
+                        direction = (le.MOVEMENT_TURN_DIRECTION_LEFT if resolved == "LEFT"
+                                     else le.MOVEMENT_TURN_DIRECTION_RIGHT)
+                        # Blocking by default -- the IMU confirms the turn
+                        # actually completed before this returns, which is
+                        # exactly what we want for a bounded turn. It does
+                        # mean no audio is read for the ~1s the turn takes;
+                        # acceptable for a deliberate, occasional action.
+                        dm.movement_turn_for_degrees(TURN_DEGREES, direction=direction, speed=TURN_SPEED)
+                    current_command = "STOP"
                 elif resolved is not None:
                     current_command = resolved
                     print(f"note {newly_committed + 1}/{NOTE_COUNT} ({refined_freq:.0f} Hz) -> {current_command}")
@@ -632,8 +656,6 @@ def audio_worker(state, dm, _mqtt_client, pa, device_index, stop_event, force_re
                 state.pending_claps = clap_detector.clap_count
                 state.forward_speed = current_forward_speed
                 state.command = current_command
-                start_received = state.start_received
-                game_over = state.game_over
 
             if start_received and not game_over and now - last_command_time >= COMMAND_PERIOD_S:
                 apply_command(dm, current_command, current_forward_speed)

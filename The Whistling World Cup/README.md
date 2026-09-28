@@ -7,12 +7,12 @@ fixed commands:
 
 | Sound | Command |
 |---|---|
-| recorder note 1 (lowest) | FORWARD, slowest |
-| recorder note 2 | FORWARD, faster |
-| recorder note 3 | FORWARD, fastest |
-| recorder note 4 | REVERSE |
-| recorder note 5 | LEFT |
-| recorder note 6 (highest) | RIGHT |
+| recorder note 1 (lowest) | FORWARD, slowest (keeps going until a new note/clap) |
+| recorder note 2 | FORWARD, faster (keeps going) |
+| recorder note 3 | FORWARD, fastest (keeps going) |
+| recorder note 4 | REVERSE (keeps going) |
+| recorder note 5 | LEFT -- a bounded 90° turn, then stops |
+| recorder note 6 (highest) | RIGHT -- a bounded 90° turn, then stops |
 | two claps | STOP |
 
 The 6 notes aren't hardcoded to specific frequencies — they're calibrated
@@ -103,8 +103,18 @@ notes) doesn't match anything and is dropped, rather than guessed at.
 `SPEED_NOTE_COUNT` (3) are all FORWARD, with the speed itself scaled
 linearly between `MIN_FORWARD_SPEED` and `MAX_FORWARD_SPEED` by note
 index; each note above that is one fixed command from `NOTE_COMMANDS`
-(REVERSE, then LEFT, then RIGHT) at a fixed speed, since there's no
-continuous signal to scale a single note by.
+(REVERSE, then LEFT, then RIGHT).
+
+LEFT/RIGHT are handled differently from the other three, though: a turn
+is a *bounded* action (a 90° rotation), not a state to keep re-issuing, so
+it doesn't go through the same latch-and-reapply path FORWARD/REVERSE/
+STOP do. The instant note 5 or 6 commits, `audio_worker` calls
+`movement_turn_for_degrees()` directly, once, with `blocking=True` (the
+default) — the LEGO hub uses its IMU to confirm the rotation actually
+completed before that call returns — and then falls back to STOP. Holding
+that note afterward doesn't trigger another turn, because
+`NoteDetector.update()` only reports a *change* to a new committed note,
+not "the same note is still committed."
 
 Pitch estimation for this actually runs at **two different resolutions**
 for two different jobs. A coarser, Welch-averaged spectrum (see the noise
@@ -121,12 +131,19 @@ apart notes 40+ Hz apart.
 **Claps decide STOP**, via `ClapStopDetector`: two claps in a row fire
 STOP immediately on the second one. A single clap not followed by a
 second within 0.5s is simply forgotten — there's no other meaning for
-one clap.
+one clap. Unlike notes, claps deliberately have **no calibration step** —
+a note's *pitch* varies by instrument and player, so it has to be
+measured, but a clap is recognized purely as "loud and broadband"
+(`is_percussive()`), which works the same regardless of whose hands are
+clapping. If claps aren't registering reliably, that's a threshold issue
+(`PERCUSSIVE_RMS_MARGIN`, or the noise floor it's relative to), not a
+missing training step.
 
-All outcomes *latch* — the car keeps executing the current one (issued
-to the LEGO hub over Bluetooth at most every 100 ms) until a new one
-fires. You don't have to keep playing a note or keep clapping to keep the
-car moving.
+FORWARD/REVERSE/STOP *latch* — the car keeps executing the current one
+(issued to the LEGO hub over Bluetooth at most every 100 ms) until a new
+one fires. You don't have to keep playing a note or keep clapping to keep
+the car moving. LEFT/RIGHT don't latch in that sense (see above) — they
+run once to completion and then the car is back to STOP.
 
 Catching an opponent (light sensor) and scoring a goal (a dedicated
 command, not implemented yet — see the `TODO` on `handle_goal()` in
