@@ -117,7 +117,10 @@ WELCH_SEGMENTS = 4
 SUB_CHUNK = CHUNK // WELCH_SEGMENTS
 PEAKINESS_MIN = 6.0        # peak power must be >= this many x the in-band median power to count as tonal
 CALIBRATION_S = 1.5        # seconds of ambient noise sampled at startup to set the noise floor
-NOISE_FLOOR_K = 4.0        # noise floor = ambient_rms_mean + K * ambient_rms_std
+NOISE_FLOOR_K = 1.0        # noise floor = ambient_rms_mean + K * ambient_rms_std -- kept low
+                           # because the peakiness gate (not volume) is what actually tells a
+                           # note from noise, so this doesn't need a big safety margin; lower
+                           # further if a quiet instrument still can't clear it
 
 MIN_FORWARD_SPEED, MAX_FORWARD_SPEED = 30, 90  # note 1 (lowest) -> MIN, note SPEED_NOTE_COUNT -> MAX
 REVERSE_SPEED = 45          # fixed -- REVERSE is one note, not a range, so there's no pitch to vary it by
