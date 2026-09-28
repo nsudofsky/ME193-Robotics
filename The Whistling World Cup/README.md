@@ -12,6 +12,7 @@ per-note lookup table:
 | recorder note 5 | LEFT -- a bounded 90° turn, then stops |
 | recorder note 6 (highest) | RIGHT -- a bounded 90° turn, then stops |
 | one clap | STOP |
+| 3 quick RIGHT turns in a row (**ball role only**) | GOAL -- publishes to MQTT, ends the match |
 
 Notes 1-3 originally each drove a different FORWARD speed tier, but
 weren't reliably distinguishable from each other in practice, so they
@@ -118,10 +119,18 @@ it doesn't go through the same latch-and-reapply path FORWARD/REVERSE/
 STOP do. The instant note 5 or 6 commits, `audio_worker` calls
 `movement_turn_for_degrees()` directly, once, with `blocking=True` (the
 default) — the LEGO hub uses its IMU to confirm the rotation actually
-completed before that call returns — and then falls back to STOP. Holding
-that note afterward doesn't trigger another turn, because
-`NoteDetector.update()` only reports a *change* to a new committed note,
-not "the same note is still committed."
+completed before that call returns — and then falls back to STOP.
+Continuing to hold that note afterward doesn't trigger a second turn
+(it's still the same committed note, so nothing "changes"), but playing
+it again after a real gap of silence does — `NoteDetector` resets its
+committed note back to `None` once it confirms actual silence, so
+replaying the same note is treated as a fresh commit rather than
+suppressed forever. This is also what makes the ball's GOAL signal
+possible: 3 quick, separate RIGHT commits in a row, each firing its own
+real turn, counted by a small rolling-window tap counter in
+`audio_worker` (`GOAL_TAP_COUNT` within `GOAL_TAP_WINDOW_S`) and
+role-gated to `state.role == "ball"` — the goalie can turn right as much
+as it wants without ever scoring a goal on itself.
 
 Pitch estimation for this actually runs at **two different resolutions**
 for two different jobs. A coarser, Welch-averaged spectrum (see the noise
@@ -152,10 +161,10 @@ one fires. You don't have to keep playing a note or keep clapping to keep
 the car moving. LEFT/RIGHT don't latch in that sense (see above) — they
 run once to completion and then the car is back to STOP.
 
-Catching an opponent (light sensor) and scoring a goal (a dedicated
-command, not implemented yet — see the `TODO` on `handle_goal()` in
-`whistling.py`, since every note and both claps are now taken) are both
-handled outside this policy entirely.
+Catching an opponent (light sensor, `handle_caught()`) and scoring a goal
+(the 3-RIGHT-turns signal, `handle_goal()`) are both handled outside this
+policy entirely, and both are gated to `state.role == "ball"` — see
+[Match logic (MQTT)](#match-logic-mqtt) below for why.
 
 ### What does your code do if no sound is detected?
 
@@ -218,21 +227,36 @@ sound, which is how the thresholds above were tuned.
 
 - `ME193/Rogers` — instructor-published `"start"` trigger. Both roles
   subscribe and hold at STOP until it arrives.
-- `RESULT_TOPIC` (`ME193/Rogers/whistling-world-cup` by default — rename
-  this per the setup note above) — used for the two outcome messages, each
-  published as `"<event>:<role>"`:
-  - `"caught:ball"` — the ball's own light sensor saw the goalie get close.
-    The ball stops, publishes this, and plays its death song immediately
-    (it doesn't wait for its own message to echo back). The goalie, on
+- `RESULT_TOPIC` (`ME193/Rogers/whistling-world-cup` by default) — used
+  for the two outcome messages, each published as `"<event>:<role>"`:
+  - `"caught:ball"` — the ball's own light sensor saw the goalie get close
+    (`CATCH_REFLECTION`, held for `CATCH_HOLD_FRAMES` readings). The ball
+    stops, publishes this, and plays its death song immediately (it
+    doesn't wait for its own message to echo back). The goalie, on
     receiving it, plays the success song.
-  - `"goal:ball"` — the ball gave the special scoring command (not
-    implemented yet). The ball stops, publishes this, and plays its
-    success song. The goalie, on receiving it, plays the death song.
+  - `"goal:ball"` — the ball gave the special scoring command: 3 quick
+    RIGHT turns in a row (`GOAL_TAP_COUNT` within `GOAL_TAP_WINDOW_S`),
+    reusing the same RIGHT-turn signal notes already use, just counted.
+    The ball stops, publishes this, and plays its success song. The
+    goalie, on receiving it, plays the death song.
 
   Each side reacts to the *other* role's message (a client ignores a
   message carrying its own role, since the broker echoes every publish
   back to its own subscribers too) — so both songs always come out
-  opposite, as required.
+  opposite, as required. Both outcomes are role-gated at the source: only
+  `state.role == "ball"` can trigger either `handle_caught()` (via its own
+  sensor) or the goal-tap counter — the goalie's identical hardware/sound
+  vocabulary never self-triggers either one. Its win comes entirely from
+  *receiving* the ball's `"caught:ball"` message, not from anything it
+  actively signals about itself.
+
+  **You need to agree on `RESULT_TOPIC` (and this payload format) with
+  whoever you're paired against before your match** — this is explicitly
+  called out in the assignment ("you and your opponent need to agree on
+  the messages sent"). The current value is just this team's placeholder;
+  it has to match on both sides, and ideally be specific enough not to
+  collide with another pair of teams also testing on the shared public
+  broker at the same time.
 
 ## Getting `pyaudio` installed without Homebrew
 
@@ -328,11 +352,6 @@ something about what's actually reliable with real hardware and a real
 
 ## Known limitations / TODO
 
-- **Scoring a goal isn't wired up yet.** `handle_goal()` still exists
-  (stops the car, publishes `"goal:<role>"`, plays the success song) but
-  nothing calls it yet — every note (all 6, split between FORWARD/
-  REVERSE/LEFT/RIGHT) and the 1-clap STOP are already taken, so scoring
-  needs something else entirely, e.g. two claps.
 - **Note-onset transients are an untested edge case.** The very start of
   a note (breath attack before the tone stabilizes) is briefly
   broadband, in principle close to what a clap looks like.
@@ -342,18 +361,31 @@ something about what's actually reliable with real hardware and a real
   STOP right as a note starts, and tighten `PERCUSSIVE_MAX_S` or raise
   `PERCUSSIVE_RMS_MARGIN` if it happens. This is a bit more sensitive now
   that STOP only needs one clap instead of two.
+- **The GOAL signal (3 quick RIGHT turns) can, in principle, be triggered
+  by accident** if you happen to turn right 3 times within
+  `GOAL_TAP_WINDOW_S` (8s) while just maneuvering normally, not intending
+  to score. This was the pattern asked for, but it's worth knowing before
+  match day -- if it turns out to be too easy to trigger accidentally,
+  the fix is either a smaller `GOAL_TAP_WINDOW_S` or a pattern that
+  doesn't double as a normal driving action.
 - The FFT signal-analysis math (including the Welch-averaging fix and the
   quadratic-interpolation pitch refinement above), `NoteDetector`'s
-  nearest-match + debounce logic, `ClapStopDetector`'s state machine,
-  calibration persistence (verified a 2nd run makes zero audio reads when
-  a saved value exists), the AirPods-preferring device picker, and raw
-  `pyaudio` mic capture were all verified directly with synthetic
-  signals (including a realistic diatonic scale with a ~40 Hz gap between
-  two adjacent notes) and real short mic captures. What's still untested
-  is the full hardware loop — LEGO BLE connect/drive, an MQTT round-trip
-  between two laptops, and actually playing a real recorder at a real
-  microphone — which needs the LEGO hub, the recorder, and a second
-  laptop in hand.
+  nearest-match + debounce logic (including the fix that lets the *same*
+  note re-fire after a confirmed silence gap, verified with a direct
+  test — this also made the goal-tap counter possible, since 3 RIGHT
+  commits in a row need the 2nd and 3rd to actually fire), `ClapStopDetector`'s
+  state machine, the goal-tap counter and its ball-only role gate, the
+  same role gate on catch-detection (verified: a simulated close-proximity
+  reading fires a loss for `role="ball"` but does nothing for
+  `role="goalie"`), `on_result_message`'s symmetric win/lose reaction
+  (verified for both `"caught"` and `"goal"` events), calibration
+  persistence (verified a 2nd run makes zero audio reads when a saved
+  value exists), the AirPods-preferring device picker, and raw `pyaudio`
+  mic capture were all verified directly with synthetic signals and real
+  short mic captures. What's still untested is the full hardware loop —
+  LEGO BLE connect/drive, an MQTT round-trip between two actual laptops,
+  and actually playing a real recorder at a real microphone — which needs
+  the LEGO hub, the recorder, and a second laptop in hand.
 - `CATCH_REFLECTION` (the "opponent is right on top of the sensor"
   threshold), `FORWARD_SPEED`, and `REVERSE_SPEED` (currently deliberately
   slow) are starting guesses — recalibrate/retune them against your

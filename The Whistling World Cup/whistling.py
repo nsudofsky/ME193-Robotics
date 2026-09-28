@@ -10,6 +10,7 @@ drives the car using a recorder (the instrument) and claps:
     note 5                          -> LEFT, a bounded 90 degree turn, then STOP
     note 6 (highest)                -> RIGHT, a bounded 90 degree turn, then STOP
     one clap                        -> STOP
+    3 quick RIGHT turns (ball only) -> GOAL: publishes over MQTT and ends the match
 
 Notes 1-3 all mean the same thing (REVERSE) rather than 3 distinct speed
 tiers, since they weren't reliably distinguishable from each other in
@@ -23,7 +24,12 @@ setup every time (see --recalibrate).
 
 On match day the car is also assigned a role -- "ball" or "goalie" -- and
 the two cars coordinate the match over MQTT (start trigger, catch/goal
-outcomes, and matching victory/death songs).
+outcomes, and matching victory/death songs). Only the ball can be "caught"
+(by the goalie's proximity, via its own light sensor) or score a goal (the
+3-right-turns signal above); the goalie's job is just to drive into range
+of the ball's sensor using the same sound controls -- its win comes
+automatically from the ball's own "caught" MQTT message, not from
+anything the goalie actively signals itself.
 
 Run:
     python whistling.py --role ball
@@ -120,11 +126,20 @@ NOISE_FLOOR_K = 1.0        # noise floor = ambient_rms_mean + K * ambient_rms_st
                            # note from noise, so this doesn't need a big safety margin; lower
                            # further if a quiet instrument still can't clear it
 
-FORWARD_SPEED = 75          # fixed -- however many notes map to FORWARD, they all drive at this one speed
-REVERSE_SPEED = 15          # fixed and deliberately slower than FORWARD -- reversing blind is riskier
+FORWARD_SPEED = 50          # fixed -- however many notes map to FORWARD, they all drive at this one speed
+REVERSE_SPEED = 50          # fixed and deliberately slower than FORWARD -- reversing blind is riskier
 TURN_SPEED = 55             # turn speed %% for the LEFT/RIGHT rotation below
 TURN_DEGREES = 90           # LEFT/RIGHT are a bounded turn-and-stop, not a continuous spin -- this many
                             # degrees, via the IMU-confirmed movement_turn_for_degrees() (see audio_worker)
+
+# The ball's special "I reached the goal" signal: this many RIGHT turns in
+# a row (each one a real, visible 90-degree turn -- see audio_worker),
+# within GOAL_TAP_WINDOW_S of each other. Only meaningful for role=="ball";
+# the goalie can turn right freely without ever triggering this. The window
+# has to be generous -- each turn itself blocks for close to a second, on
+# top of the time it takes to re-aim and replay the note.
+GOAL_TAP_COUNT = 3
+GOAL_TAP_WINDOW_S = 8.0
 
 # Claps: STOP, on just one clap. A clap is loud and broadband -- the
 # opposite of a recorder note's narrowband pitch -- so it's never
@@ -295,6 +310,15 @@ class NoteDetector:
     than half the smallest gap between adjacent notes) doesn't match
     anything and is dropped, the same "ambiguous -> ignore" philosophy
     used everywhere else in this policy.
+
+    A confirmed gap of silence (NOTE_VOTE_FRAMES frames with no tonal
+    match) resets the committed note back to None. Without this, playing
+    the *same* note twice in a row -- silence, then that note again --
+    would never re-fire, since a "new" commit only used to mean "different
+    from last time": replaying a one-shot command like a turn wouldn't do
+    anything the second time. Two calibrated notes are never adjacent
+    enough to blur into this reset (max_distance already keeps stray
+    pitches from matching any note at all, silence or not).
     """
 
     def __init__(self, note_freqs):
@@ -315,7 +339,9 @@ class NoteDetector:
         self.recent.append(idx)
         if len(self.recent) == NOTE_VOTE_FRAMES and len(set(self.recent)) == 1:
             candidate = self.recent[-1]
-            if candidate is not None and candidate != self.committed_index:
+            if candidate is None:
+                self.committed_index = None  # confirmed silence -- allow the same note to re-fire next time
+            elif candidate != self.committed_index:
                 self.committed_index = candidate
                 return candidate
         return None
@@ -386,13 +412,9 @@ def handle_caught(state, dm, mqtt_client):
 
 
 def handle_goal(state, dm, mqtt_client):
-    """We (the ball) gave the special scoring command.
-
-    TODO: nothing calls this yet. Every note (all 6, split between
-    FORWARD/REVERSE/LEFT/RIGHT) and 1 clap (STOP) are already taken, so
-    scoring needs something else entirely -- e.g. two claps -- wired up
-    here the way catch-detection is wired to handle_caught().
-    """
+    """We (the ball) gave the special scoring command -- GOAL_TAP_COUNT
+    quick RIGHT turns in a row (see the goal-tap tracking in
+    audio_worker, role-gated to state.role == "ball" there)."""
     with state.lock:
         if state.game_over:
             return
@@ -559,9 +581,7 @@ def calibrate_notes(state, stream, force=False):
 # Worker threads
 # --------------------------------------------------------------------------
 
-def audio_worker(state, dm, _mqtt_client, pa, device_index, stop_event, force_recalibrate):
-    # _mqtt_client: unused for now -- reserved for the goal-command TODO in
-    # handle_goal() once that pattern is wired up here.
+def audio_worker(state, dm, mqtt_client, pa, device_index, stop_event, force_recalibrate):
     stream = pa.open(format=pyaudio.paFloat32, channels=1, rate=SAMPLE_RATE,
                       input=True, input_device_index=device_index,
                       frames_per_buffer=CHUNK)
@@ -576,6 +596,7 @@ def audio_worker(state, dm, _mqtt_client, pa, device_index, stop_event, force_re
         current_command = "STOP"  # safe default until the first recognized command
         current_forward_speed = FORWARD_SPEED
         last_command_time = 0.0
+        right_tap_times = deque()  # for the ball's "3 right turns in a row" goal signal
 
         while not stop_event.is_set():
             raw = stream.read(CHUNK, exception_on_overflow=False)
@@ -612,6 +633,19 @@ def audio_worker(state, dm, _mqtt_client, pa, device_index, stop_event, force_re
                         # mean no audio is read for the ~1s the turn takes;
                         # acceptable for a deliberate, occasional action.
                         dm.movement_turn_for_degrees(TURN_DEGREES, direction=direction, speed=TURN_SPEED)
+
+                        # The ball's goal signal: GOAL_TAP_COUNT RIGHT turns
+                        # within GOAL_TAP_WINDOW_S. Only the ball can score --
+                        # the goalie can turn right as much as it wants.
+                        if resolved == "RIGHT" and state.role == "ball":
+                            tap_time = time.monotonic()
+                            right_tap_times.append(tap_time)
+                            while right_tap_times and tap_time - right_tap_times[0] > GOAL_TAP_WINDOW_S:
+                                right_tap_times.popleft()
+                            if len(right_tap_times) >= GOAL_TAP_COUNT:
+                                right_tap_times.clear()
+                                print(f"GOAL! ({GOAL_TAP_COUNT} quick right turns)")
+                                handle_goal(state, dm, mqtt_client)
                     current_command = "STOP"
                 elif resolved is not None:
                     current_command = resolved
@@ -639,15 +673,21 @@ def audio_worker(state, dm, _mqtt_client, pa, device_index, stop_event, force_re
 
 
 def sensor_worker(state, cs, dm, mqtt_client, stop_event):
+    """Only the ball can be "caught" -- the goalie catching the ball is a
+    win for the goalie, but that comes from the ball's own MQTT message
+    (see on_result_message), not from the goalie's own sensor. Without
+    this role gate, the goalie's sensor firing would declare *itself*
+    caught (a self-inflicted loss) instead, which is backwards."""
     consecutive = 0
     while not stop_event.is_set():
         reflection = cs.reflection()
         with state.lock:
             state.reflection = reflection
             game_over = state.game_over
+            role = state.role
 
         consecutive = consecutive + 1 if reflection >= CATCH_REFLECTION else 0
-        if consecutive >= CATCH_HOLD_FRAMES and not game_over:
+        if consecutive >= CATCH_HOLD_FRAMES and not game_over and role == "ball":
             handle_caught(state, dm, mqtt_client)
 
         time.sleep(0.1)
