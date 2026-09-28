@@ -409,6 +409,7 @@ def handle_caught(state, dm, mqtt_client):
     if mqtt_client is not None:
         mqtt_client.publish(RESULT_TOPIC, f"caught:{state.role}")
     songs.play_death_song()
+    songs.play_death_song_on_hub(dm)
 
 
 def handle_goal(state, dm, mqtt_client):
@@ -424,6 +425,7 @@ def handle_goal(state, dm, mqtt_client):
     if mqtt_client is not None:
         mqtt_client.publish(RESULT_TOPIC, f"goal:{state.role}")
     songs.play_success_song()
+    songs.play_success_song_on_hub(dm)
 
 
 def on_start_message(state, topic, payload):
@@ -449,9 +451,13 @@ def on_result_message(state, dm, _topic, payload):
         state.outcome = "won" if event == "caught" else "lost"
     stop_robot(dm)
     if event == "caught":
-        songs.play_success_song()  # the other car got caught -- we win the point
+        # the other car got caught -- we win the point
+        songs.play_success_song()
+        songs.play_success_song_on_hub(dm)
     elif event == "goal":
-        songs.play_death_song()    # the other car scored -- we lose the point
+        # the other car scored -- we lose the point
+        songs.play_death_song()
+        songs.play_death_song_on_hub(dm)
 
 
 # --------------------------------------------------------------------------

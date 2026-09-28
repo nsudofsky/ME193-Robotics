@@ -1,9 +1,13 @@
 """
-Short synthesized jingles played through the *computer's* speakers (not the
-LEGO hub, which only supports a handful of canned beep patterns). Used to
-announce the match outcome: a success fanfare for whoever wins the point,
-a death song for whoever loses it.
+Short jingles used to announce the match outcome: a success fanfare for
+whoever wins the point, a death song for whoever loses it. Playable
+either through the *computer's* speakers (synthesized with numpy,
+play_success_song()/play_death_song()) or through the LEGO hub's own
+speaker (play_success_song_on_hub(dm)/play_death_song_on_hub(dm)), using
+the same note sequences either way.
 """
+
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -73,3 +77,30 @@ def play_success_song():
 
 def play_death_song():
     _play_notes(DEATH_SONG, "playing death song...")
+
+
+def _play_notes_on_hub(dm, notes, label):
+    """Play a (frequency, duration) sequence on the LEGO hub's own
+    speaker. dm.beep() has no duration parameter of its own -- just
+    pitch -- so each note is started with blocking=False, held open for
+    exactly `duration` via sleep(), then cut off with stop_beep(), giving
+    the same per-note timing as the computer-speaker version."""
+    print(label)
+    try:
+        for freq, duration in notes:
+            if freq <= 0:
+                time.sleep(duration)  # a rest
+                continue
+            dm.beep(frequency=int(freq), count=1, blocking=False)
+            time.sleep(duration)
+            dm.stop_beep(blocking=False)
+    except Exception as exc:  # e.g. hub not connected -- don't crash the match over it
+        print(f"  (could not play hub audio: {exc})")
+
+
+def play_success_song_on_hub(dm):
+    _play_notes_on_hub(dm, SUCCESS_SONG, "playing success song on the hub...")
+
+
+def play_death_song_on_hub(dm):
+    _play_notes_on_hub(dm, DEATH_SONG, "playing death song on the hub...")
