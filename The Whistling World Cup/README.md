@@ -2,27 +2,29 @@
 
 A LEGO car driven by a recorder (the instrument) and claps. `whistling.py`
 grabs a live microphone stream with `pyaudio`, listens for one of 6
-calibrated recorder notes, and splits them between forward-speed tiers and
-fixed commands:
+calibrated recorder notes, and splits them between "any of these means
+FORWARD" and individual fixed commands:
 
 | Sound | Command |
 |---|---|
-| recorder note 1 (lowest) | FORWARD, slowest (keeps going until a new note/clap) |
-| recorder note 2 | FORWARD, faster (keeps going) |
-| recorder note 3 | FORWARD, fastest (keeps going) |
-| recorder note 4 | REVERSE (keeps going) |
+| recorder notes 1-3 (any of the 3 lowest) | FORWARD, one fixed speed (keeps going until a new note/clap) |
+| recorder note 4 | REVERSE, slow (keeps going) |
 | recorder note 5 | LEFT -- a bounded 90° turn, then stops |
 | recorder note 6 (highest) | RIGHT -- a bounded 90° turn, then stops |
 | two claps | STOP |
 
-The 6 notes aren't hardcoded to specific frequencies — they're calibrated
-to *your* recorder at startup (play each one, lowest to highest, when
-prompted), since the exact pitch depends on the instrument and fingering.
-Which notes are speed tiers vs. fixed commands, and which fixed command
-each one maps to, is controlled by `SPEED_NOTE_COUNT`/`NOTE_COMMANDS` near
-the top of `whistling.py` — easy to change without touching the
-calibration flow itself. On match day the car is also assigned a role —
-**ball** or **goalie** — and the two cars coordinate the match over MQTT.
+Notes 1-3 originally each drove a different speed tier, but weren't
+reliably distinguishable from each other in practice, so they were
+collapsed into one outcome — any of the 3 lowest notes just means
+"forward," at a single fixed speed. The 6 notes still aren't hardcoded to
+specific frequencies, though — they're calibrated to *your* recorder at
+startup (play each one, lowest to highest, when prompted), since the
+exact pitch depends on the instrument and fingering, and calibration
+itself didn't change. Which notes mean FORWARD vs. an individual fixed
+command, and which command each one maps to, is controlled by
+`SPEED_NOTE_COUNT`/`NOTE_COMMANDS` near the top of `whistling.py`. On
+match day the car is also assigned a role — **ball** or **goalie** — and
+the two cars coordinate the match over MQTT.
 
 ## Files
 
@@ -100,10 +102,11 @@ noisy frames without adding much lag. A pitch too far from every
 calibrated note (more than half the smallest gap between two adjacent
 notes) doesn't match anything and is dropped, rather than guessed at.
 `command_for_note()` then splits the 6 committed note indices: the lowest
-`SPEED_NOTE_COUNT` (3) are all FORWARD, with the speed itself scaled
-linearly between `MIN_FORWARD_SPEED` and `MAX_FORWARD_SPEED` by note
-index; each note above that is one fixed command from `NOTE_COMMANDS`
-(REVERSE, then LEFT, then RIGHT).
+`SPEED_NOTE_COUNT` (3) are all FORWARD at the same fixed `FORWARD_SPEED`
+(originally scaled by note index into 3 speed tiers, but the lowest 3
+notes weren't reliably distinguishable from each other in practice, so
+they were collapsed into one outcome); each note above that is one fixed
+command from `NOTE_COMMANDS` (REVERSE, then LEFT, then RIGHT).
 
 LEFT/RIGHT are handled differently from the other three, though: a turn
 is a *bounded* action (a 90° rotation), not a state to keep re-issuing, so
@@ -348,10 +351,9 @@ something about what's actually reliable with real hardware and a real
   microphone — which needs the LEGO hub, the recorder, and a second
   laptop in hand.
 - `CATCH_REFLECTION` (the "opponent is right on top of the sensor"
-  threshold) and `MIN_FORWARD_SPEED`/`MAX_FORWARD_SPEED` (the speed range
-  notes map to) are starting guesses — recalibrate/retune them against
-  your actual color sensor and how fast you want the slowest/fastest note
-  to drive.
+  threshold), `FORWARD_SPEED`, and `REVERSE_SPEED` (currently deliberately
+  slow) are starting guesses — recalibrate/retune them against your
+  actual color sensor and how fast you actually want the car moving.
 - **Fixed:** the live plot used to sit frozen during both calibration
   steps (only the printed terminal numbers updated) because calibration
   read raw audio directly instead of going through `classify_frame()`

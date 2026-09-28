@@ -5,23 +5,21 @@ The Whistling World Cup
 Sound-controlled LEGO car. A live microphone feed (captured with pyaudio)
 drives the car using a recorder (the instrument) and claps:
 
-    note 1 (lowest)   -> FORWARD, slowest       (latched -- keeps going)
-    note 2            -> FORWARD, faster        (latched -- keeps going)
-    note 3            -> FORWARD, fastest       (latched -- keeps going)
-    note 4            -> REVERSE                (latched -- keeps going)
-    note 5            -> LEFT, a bounded 90 degree turn, then STOP
-    note 6 (highest)  -> RIGHT, a bounded 90 degree turn, then STOP
-    two claps         -> STOP
+    notes 1-3 (any of the 3 lowest)  -> FORWARD, one fixed speed (latched -- keeps going)
+    note 4                          -> REVERSE, slow (latched -- keeps going)
+    note 5                          -> LEFT, a bounded 90 degree turn, then STOP
+    note 6 (highest)                -> RIGHT, a bounded 90 degree turn, then STOP
+    two claps                       -> STOP
 
-The 6 notes are whatever your recorder actually produces -- calibrated to
-your instrument at startup rather than hardcoded, since exact pitches vary
-by instrument and fingering. Both the noise floor and the note
-calibration are saved to disk after the first run and reused on every run
-after that, so you don't have to redo that setup every time (see
---recalibrate). SPEED_NOTE_COUNT and NOTE_COMMANDS (near the top of the
-file) are what actually control this split -- change them if you want a
-different number of speed tiers or a different order for REVERSE/LEFT/
-RIGHT.
+Notes 1-3 all mean the same thing (FORWARD) rather than 3 distinct speed
+tiers, since they weren't reliably distinguishable from each other in
+practice -- see the SPEED_NOTE_COUNT comment near the top of the file if
+you want to reintroduce tiers later. The 6 notes are whatever your
+recorder actually produces -- calibrated to your instrument at startup
+rather than hardcoded, since exact pitches vary by instrument and
+fingering. Both the noise floor and the note calibration are saved to
+disk after the first run and reused on every run after that, so you don't
+have to redo that setup every time (see --recalibrate).
 
 On match day the car is also assigned a role -- "ball" or "goalie" -- and
 the two cars coordinate the match over MQTT (start trigger, catch/goal
@@ -90,12 +88,14 @@ NOTE_VOTE_FRAMES = 2        # consecutive frames that must agree on a note befor
 NOTE_HOLD_S = 5.0           # how long to actively listen for each note during calibration
 NOTE_GAP_S = 1.0            # pause between notes during calibration, to switch fingering
 
-# The lowest SPEED_NOTE_COUNT notes are FORWARD speed tiers (higher note =
-# faster). Each note above that is one fixed command of its own, in order
-# -- so with NOTE_COUNT=6 and SPEED_NOTE_COUNT=3, notes 4/5/6 are REVERSE/
-# LEFT/RIGHT. NOTE_COMMANDS is what actually maps the "extra" notes; edit
-# it (not the number 3 alone) if you want a different order or fewer of
-# them wired up.
+# The lowest SPEED_NOTE_COUNT notes are all just FORWARD at one fixed
+# speed (FORWARD_SPEED below) -- notes 1-3 weren't reliably distinguishable
+# from each other on the actual recorder, so rather than needing 3 clean
+# speed tiers, any of the 3 lowest notes now means the same thing. Each
+# note above that is one fixed command of its own, in order -- so with
+# NOTE_COUNT=6 and SPEED_NOTE_COUNT=3, notes 4/5/6 are REVERSE/LEFT/RIGHT.
+# NOTE_COMMANDS is what actually maps the "extra" notes; edit it (not the
+# number 3 alone) if you want a different order or fewer of them wired up.
 SPEED_NOTE_COUNT = 3
 NOTE_COMMANDS = ["REVERSE", "LEFT", "RIGHT"]  # for notes SPEED_NOTE_COUNT, SPEED_NOTE_COUNT+1, ...
 
@@ -122,8 +122,8 @@ NOISE_FLOOR_K = 1.0        # noise floor = ambient_rms_mean + K * ambient_rms_st
                            # note from noise, so this doesn't need a big safety margin; lower
                            # further if a quiet instrument still can't clear it
 
-MIN_FORWARD_SPEED, MAX_FORWARD_SPEED = 30, 90  # note 1 (lowest) -> MIN, note SPEED_NOTE_COUNT -> MAX
-REVERSE_SPEED = 45          # fixed -- REVERSE is one note, not a range, so there's no pitch to vary it by
+FORWARD_SPEED = 30          # fixed -- all of notes 1-3 drive at this one speed, no tiers
+REVERSE_SPEED = 20          # fixed and deliberately slow -- reversing blind is riskier than forward
 TURN_SPEED = 55             # turn speed %% for the LEFT/RIGHT rotation below
 TURN_DEGREES = 90           # LEFT/RIGHT are a bounded turn-and-stop, not a continuous spin -- this many
                             # degrees, via the IMU-confirmed movement_turn_for_degrees() (see audio_worker)
@@ -180,7 +180,7 @@ class SharedState:
         self.note_freqs = []           # the 6 calibrated note frequencies, lowest to highest
         self.committed_note = None     # index (0-5) of the currently-committed note, or None
         self.pending_claps = 0         # claps counted so far, waiting to see if a 2nd completes STOP
-        self.forward_speed = MIN_FORWARD_SPEED  # last live-tracked FORWARD speed
+        self.forward_speed = FORWARD_SPEED  # for display only now -- always the same fixed value
         self.command = "STOP"          # the currently-latched drive command
 
         self.reflection = 0
@@ -276,12 +276,11 @@ def is_percussive(rms, tonal, noise_floor):
 # Command detectors
 # --------------------------------------------------------------------------
 
-def forward_speed_for_note(index):
-    """index must be < SPEED_NOTE_COUNT -- one of the FORWARD speed tiers."""
-    if SPEED_NOTE_COUNT <= 1:
-        return MAX_FORWARD_SPEED
-    frac = index / (SPEED_NOTE_COUNT - 1)
-    return MIN_FORWARD_SPEED + frac * (MAX_FORWARD_SPEED - MIN_FORWARD_SPEED)
+def forward_speed_for_note(_index):
+    """All SPEED_NOTE_COUNT notes map to the same fixed FORWARD_SPEED now
+    (see the SPEED_NOTE_COUNT comment above) -- index is unused, kept only
+    so the call site doesn't need to change if tiers come back later."""
+    return FORWARD_SPEED
 
 
 def command_for_note(index):
@@ -416,9 +415,9 @@ def handle_goal(state, dm, mqtt_client):
     """We (the ball) gave the special scoring command.
 
     TODO: nothing calls this yet. Every note (all 6, split between
-    FORWARD's speed tiers and REVERSE/LEFT/RIGHT) and 2 claps are already
-    taken, so scoring needs something else entirely -- e.g. three claps --
-    wired up here the way catch-detection is wired to handle_caught().
+    FORWARD and REVERSE/LEFT/RIGHT) and 2 claps are already taken, so
+    scoring needs something else entirely -- e.g. three claps -- wired up
+    here the way catch-detection is wired to handle_caught().
     """
     with state.lock:
         if state.game_over:
@@ -601,7 +600,7 @@ def audio_worker(state, dm, _mqtt_client, pa, device_index, stop_event, force_re
         note_detector = NoteDetector(note_freqs)
         clap_detector = ClapStopDetector()
         current_command = "STOP"  # safe default until the first recognized command
-        current_forward_speed = MIN_FORWARD_SPEED
+        current_forward_speed = FORWARD_SPEED
         last_command_time = 0.0
 
         while not stop_event.is_set():
