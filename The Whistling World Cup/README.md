@@ -2,29 +2,32 @@
 
 A LEGO car driven by a recorder (the instrument) and claps. `whistling.py`
 grabs a live microphone stream with `pyaudio`, listens for one of 6
-calibrated recorder notes, and splits them between "any of these means
-FORWARD" and individual fixed commands:
+calibrated recorder notes, and maps each one to a command via a simple
+per-note lookup table:
 
 | Sound | Command |
 |---|---|
-| recorder notes 1-3 (any of the 3 lowest) | FORWARD, one fixed speed (keeps going until a new note/clap) |
-| recorder note 4 | REVERSE, slow (keeps going) |
+| recorder notes 1-3 (any of the 3 lowest) | REVERSE, one fixed (slow) speed |
+| recorder note 4 | FORWARD, one fixed (faster) speed |
 | recorder note 5 | LEFT -- a bounded 90° turn, then stops |
 | recorder note 6 (highest) | RIGHT -- a bounded 90° turn, then stops |
-| two claps | STOP |
+| one clap | STOP |
 
-Notes 1-3 originally each drove a different speed tier, but weren't
-reliably distinguishable from each other in practice, so they were
-collapsed into one outcome — any of the 3 lowest notes just means
-"forward," at a single fixed speed. The 6 notes still aren't hardcoded to
-specific frequencies, though — they're calibrated to *your* recorder at
-startup (play each one, lowest to highest, when prompted), since the
+Notes 1-3 originally each drove a different FORWARD speed tier, but
+weren't reliably distinguishable from each other in practice, so they
+were collapsed into one outcome — any of the 3 lowest notes means the
+same thing. FORWARD and REVERSE were then swapped (so the group of 3
+notes is REVERSE and the single note 4 is FORWARD) and their speeds set
+further apart: FORWARD faster, REVERSE slower, since reversing blind is
+riskier. STOP dropped from two claps to one. The 6 notes still aren't
+hardcoded to specific frequencies — they're calibrated to *your* recorder
+at startup (play each one, lowest to highest, when prompted), since the
 exact pitch depends on the instrument and fingering, and calibration
-itself didn't change. Which notes mean FORWARD vs. an individual fixed
-command, and which command each one maps to, is controlled by
-`SPEED_NOTE_COUNT`/`NOTE_COMMANDS` near the top of `whistling.py`. On
-match day the car is also assigned a role — **ball** or **goalie** — and
-the two cars coordinate the match over MQTT.
+itself didn't change through any of this. The whole note-to-command
+mapping lives in one list, `NOTE_COMMANDS`, near the top of
+`whistling.py` — reordering or reassigning any note is a one-line change
+there. On match day the car is also assigned a role — **ball** or
+**goalie** — and the two cars coordinate the match over MQTT.
 
 ## Files
 
@@ -101,12 +104,13 @@ consecutive frames agree on it (`NoteDetector`) — this debounces one-off
 noisy frames without adding much lag. A pitch too far from every
 calibrated note (more than half the smallest gap between two adjacent
 notes) doesn't match anything and is dropped, rather than guessed at.
-`command_for_note()` then splits the 6 committed note indices: the lowest
-`SPEED_NOTE_COUNT` (3) are all FORWARD at the same fixed `FORWARD_SPEED`
-(originally scaled by note index into 3 speed tiers, but the lowest 3
-notes weren't reliably distinguishable from each other in practice, so
-they were collapsed into one outcome); each note above that is one fixed
-command from `NOTE_COMMANDS` (REVERSE, then LEFT, then RIGHT).
+`command_for_note()` then looks the committed index up in `NOTE_COMMANDS`
+— one entry per note, currently `["REVERSE", "REVERSE", "REVERSE",
+"FORWARD", "LEFT", "RIGHT"]`. FORWARD and REVERSE both drive at one fixed
+speed each (`FORWARD_SPEED`/`REVERSE_SPEED`) regardless of which note(s)
+map to them, so the 3 lowest notes sharing REVERSE — because they weren't
+reliably distinguishable from each other in practice — doesn't need any
+special-casing beyond the lookup table itself.
 
 LEFT/RIGHT are handled differently from the other three, though: a turn
 is a *bounded* action (a 90° rotation), not a state to keep re-issuing, so
@@ -131,10 +135,10 @@ interpolation around the peak bin — verified in testing to land within
 ~1 Hz of the true pitch for a clean tone, easily precise enough to tell
 apart notes 40+ Hz apart.
 
-**Claps decide STOP**, via `ClapStopDetector`: two claps in a row fire
-STOP immediately on the second one. A single clap not followed by a
-second within 0.5s is simply forgotten — there's no other meaning for
-one clap. Unlike notes, claps deliberately have **no calibration step** —
+**A clap decides STOP**, via `ClapStopDetector`: one clap fires STOP the
+instant the clap burst ends (a broadband burst longer than
+`PERCUSSIVE_MAX_S`, e.g. a scrape, is ignored rather than firing it).
+Unlike notes, claps deliberately have **no calibration step** —
 a note's *pitch* varies by instrument and player, so it has to be
 measured, but a clap is recognized purely as "loud and broadband"
 (`is_percussive()`), which works the same regardless of whose hands are
@@ -156,14 +160,13 @@ handled outside this policy entirely.
 ### What does your code do if no sound is detected?
 
 It does **nothing** — it keeps executing whichever command last fired
-(starting from STOP, the safe default, at boot), except that the forward
-speed simply stops updating rather than resetting. This is a deliberate
-consequence of the latching design: a note or a clap-pair is meant to set
-a new state and then leave it alone, so there's no single continuous
-signal to "lose" by going silent — falling back to STOP on silence would
-defeat the whole point of a "keep doing this until told otherwise"
-control scheme. The car only stops when two claps actually fire, the
-catch sensor trips, or the match ends over MQTT.
+(starting from STOP, the safe default, at boot). This is a deliberate
+consequence of the latching design: a note is meant to set a new state
+and then leave it alone, so there's no single continuous signal to "lose"
+by going silent — falling back to STOP on silence would defeat the whole
+point of a "keep doing this until told otherwise" control scheme. The
+car only stops when a clap actually fires, the catch sensor trips, or the
+match ends over MQTT.
 
 ### How did you try to mask out unwanted noise?
 
@@ -327,17 +330,18 @@ something about what's actually reliable with real hardware and a real
 
 - **Scoring a goal isn't wired up yet.** `handle_goal()` still exists
   (stops the car, publishes `"goal:<role>"`, plays the success song) but
-  nothing calls it yet — every note (all 6, split between FORWARD's
-  speed tiers and REVERSE/LEFT/RIGHT) and 2 claps are already taken, so
-  scoring needs something else entirely, e.g. three claps.
+  nothing calls it yet — every note (all 6, split between FORWARD/
+  REVERSE/LEFT/RIGHT) and the 1-clap STOP are already taken, so scoring
+  needs something else entirely, e.g. two claps.
 - **Note-onset transients are an untested edge case.** The very start of
   a note (breath attack before the tone stabilizes) is briefly
   broadband, in principle close to what a clap looks like.
   `PERCUSSIVE_MAX_S` (0.25s) should keep a full note from ever being read
   as percussive, but a real attack landing in its own frame right at the
   start of a note hasn't been tested on hardware -- watch for a phantom
-  clap-count tick right as a note starts, and tighten `PERCUSSIVE_MAX_S`
-  or raise `PERCUSSIVE_RMS_MARGIN` if it happens.
+  STOP right as a note starts, and tighten `PERCUSSIVE_MAX_S` or raise
+  `PERCUSSIVE_RMS_MARGIN` if it happens. This is a bit more sensitive now
+  that STOP only needs one clap instead of two.
 - The FFT signal-analysis math (including the Welch-averaging fix and the
   quadratic-interpolation pitch refinement above), `NoteDetector`'s
   nearest-match + debounce logic, `ClapStopDetector`'s state machine,

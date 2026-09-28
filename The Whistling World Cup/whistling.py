@@ -5,21 +5,21 @@ The Whistling World Cup
 Sound-controlled LEGO car. A live microphone feed (captured with pyaudio)
 drives the car using a recorder (the instrument) and claps:
 
-    notes 1-3 (any of the 3 lowest)  -> FORWARD, one fixed speed (latched -- keeps going)
-    note 4                          -> REVERSE, slow (latched -- keeps going)
+    notes 1-3 (any of the 3 lowest)  -> REVERSE, one fixed speed (latched -- keeps going)
+    note 4                          -> FORWARD, faster than REVERSE (latched -- keeps going)
     note 5                          -> LEFT, a bounded 90 degree turn, then STOP
     note 6 (highest)                -> RIGHT, a bounded 90 degree turn, then STOP
-    two claps                       -> STOP
+    one clap                        -> STOP
 
-Notes 1-3 all mean the same thing (FORWARD) rather than 3 distinct speed
+Notes 1-3 all mean the same thing (REVERSE) rather than 3 distinct speed
 tiers, since they weren't reliably distinguishable from each other in
-practice -- see the SPEED_NOTE_COUNT comment near the top of the file if
-you want to reintroduce tiers later. The 6 notes are whatever your
-recorder actually produces -- calibrated to your instrument at startup
-rather than hardcoded, since exact pitches vary by instrument and
-fingering. Both the noise floor and the note calibration are saved to
-disk after the first run and reused on every run after that, so you don't
-have to redo that setup every time (see --recalibrate).
+practice -- see the NOTE_COMMANDS comment near the top of the file if you
+want a different mapping. The 6 notes are whatever your recorder actually
+produces -- calibrated to your instrument at startup rather than
+hardcoded, since exact pitches vary by instrument and fingering. Both the
+noise floor and the note calibration are saved to disk after the first
+run and reused on every run after that, so you don't have to redo that
+setup every time (see --recalibrate).
 
 On match day the car is also assigned a role -- "ball" or "goalie" -- and
 the two cars coordinate the match over MQTT (start trigger, catch/goal
@@ -88,16 +88,14 @@ NOTE_VOTE_FRAMES = 2        # consecutive frames that must agree on a note befor
 NOTE_HOLD_S = 5.0           # how long to actively listen for each note during calibration
 NOTE_GAP_S = 1.0            # pause between notes during calibration, to switch fingering
 
-# The lowest SPEED_NOTE_COUNT notes are all just FORWARD at one fixed
-# speed (FORWARD_SPEED below) -- notes 1-3 weren't reliably distinguishable
-# from each other on the actual recorder, so rather than needing 3 clean
-# speed tiers, any of the 3 lowest notes now means the same thing. Each
-# note above that is one fixed command of its own, in order -- so with
-# NOTE_COUNT=6 and SPEED_NOTE_COUNT=3, notes 4/5/6 are REVERSE/LEFT/RIGHT.
-# NOTE_COMMANDS is what actually maps the "extra" notes; edit it (not the
-# number 3 alone) if you want a different order or fewer of them wired up.
-SPEED_NOTE_COUNT = 3
-NOTE_COMMANDS = ["REVERSE", "LEFT", "RIGHT"]  # for notes SPEED_NOTE_COUNT, SPEED_NOTE_COUNT+1, ...
+# One command per calibrated note, lowest to highest -- command_for_note()
+# just looks up this list by index. FORWARD and REVERSE are both fixed
+# speeds (FORWARD_SPEED/REVERSE_SPEED below), so however many notes you
+# assign to either one, they all just mean "go" at that one speed --
+# notes 1-3 weren't reliably distinguishable from each other on the actual
+# recorder, so all three share one outcome (REVERSE) rather than needing
+# 3 clean tiers.
+NOTE_COMMANDS = ["REVERSE", "REVERSE", "REVERSE", "FORWARD", "LEFT", "RIGHT"]
 
 # A single periodogram (one FFT of one chunk) of pure broadband noise is
 # naturally spiky -- each bin's magnitude has high variance even though no
@@ -122,18 +120,17 @@ NOISE_FLOOR_K = 1.0        # noise floor = ambient_rms_mean + K * ambient_rms_st
                            # note from noise, so this doesn't need a big safety margin; lower
                            # further if a quiet instrument still can't clear it
 
-FORWARD_SPEED = 30          # fixed -- all of notes 1-3 drive at this one speed, no tiers
-REVERSE_SPEED = 20          # fixed and deliberately slow -- reversing blind is riskier than forward
+FORWARD_SPEED = 50          # fixed -- however many notes map to FORWARD, they all drive at this one speed
+REVERSE_SPEED = 15          # fixed and deliberately slower than FORWARD -- reversing blind is riskier
 TURN_SPEED = 55             # turn speed %% for the LEFT/RIGHT rotation below
 TURN_DEGREES = 90           # LEFT/RIGHT are a bounded turn-and-stop, not a continuous spin -- this many
                             # degrees, via the IMU-confirmed movement_turn_for_degrees() (see audio_worker)
 
-# Claps: STOP. A clap is loud and broadband -- the opposite of a recorder
-# note's narrowband pitch -- so it's never confused with a note no matter
-# how the thresholds above are tuned.
+# Claps: STOP, on just one clap. A clap is loud and broadband -- the
+# opposite of a recorder note's narrowband pitch -- so it's never
+# confused with a note no matter how the thresholds above are tuned.
 PERCUSSIVE_RMS_MARGIN = 1.5   # a clap must be this many x the noise floor (claps are loud)
 PERCUSSIVE_MAX_S = 0.25       # a broadband burst longer than this isn't a clap (e.g. a scrape) -- ignored
-CLAP_PHRASE_TIMEOUT_S = 0.5   # forget a lone pending clap if a 2nd one doesn't follow within this long
 
 COMMAND_PERIOD_S = 0.1     # minimum time between motor commands sent over Bluetooth
 
@@ -179,7 +176,7 @@ class SharedState:
         self.tonal_detected = False
         self.note_freqs = []           # the 6 calibrated note frequencies, lowest to highest
         self.committed_note = None     # index (0-5) of the currently-committed note, or None
-        self.pending_claps = 0         # claps counted so far, waiting to see if a 2nd completes STOP
+        self.clap_in_progress = False  # for the live display -- a percussive burst is currently being heard
         self.forward_speed = FORWARD_SPEED  # for display only now -- always the same fixed value
         self.command = "STOP"          # the currently-latched drive command
 
@@ -277,23 +274,17 @@ def is_percussive(rms, tonal, noise_floor):
 # --------------------------------------------------------------------------
 
 def forward_speed_for_note(_index):
-    """All SPEED_NOTE_COUNT notes map to the same fixed FORWARD_SPEED now
-    (see the SPEED_NOTE_COUNT comment above) -- index is unused, kept only
-    so the call site doesn't need to change if tiers come back later."""
+    """However many notes map to FORWARD, they all drive at the same
+    fixed FORWARD_SPEED -- index is unused, kept only so the call site
+    doesn't need to change if per-note speed tiers come back later."""
     return FORWARD_SPEED
 
 
 def command_for_note(index):
     """Maps a committed note index (0-based, lowest to highest) to a
-    command. The lowest SPEED_NOTE_COUNT notes are all "FORWARD" (their
-    speed comes from forward_speed_for_note separately); each note after
-    that is one fixed command of its own, per NOTE_COMMANDS. Returns None
-    for a note index beyond both groups (only possible if NOTE_COUNT is
-    larger than SPEED_NOTE_COUNT + len(NOTE_COMMANDS))."""
-    if index < SPEED_NOTE_COUNT:
-        return "FORWARD"
-    extra = index - SPEED_NOTE_COUNT
-    return NOTE_COMMANDS[extra] if extra < len(NOTE_COMMANDS) else None
+    command via NOTE_COMMANDS. Returns None for an index beyond
+    NOTE_COMMANDS (only possible if NOTE_COUNT > len(NOTE_COMMANDS))."""
+    return NOTE_COMMANDS[index] if index < len(NOTE_COMMANDS) else None
 
 
 class NoteDetector:
@@ -331,16 +322,14 @@ class NoteDetector:
 
 
 class ClapStopDetector:
-    """Two claps in a row fire STOP. A lone clap not followed by a second
-    one within CLAP_PHRASE_TIMEOUT_S is simply forgotten. update(now,
-    percussive) is called once per audio frame and returns "STOP" or None.
-    """
+    """One clap fires STOP, the instant the clap burst ends. update(now,
+    percussive) is called once per audio frame and returns "STOP" or
+    None. A broadband burst longer than PERCUSSIVE_MAX_S (e.g. a scrape,
+    not a clap) is ignored rather than firing STOP."""
 
     def __init__(self):
         self.burst_active = False
         self.burst_start = None
-        self.clap_count = 0
-        self.first_clap_time = None
 
     def update(self, now, percussive):
         command = None
@@ -353,22 +342,7 @@ class ClapStopDetector:
             self.burst_active = False
             duration = now - self.burst_start
             if duration <= PERCUSSIVE_MAX_S:
-                if self.clap_count == 0:
-                    self.first_clap_time = now
-                self.clap_count += 1
-                if self.clap_count >= 2:
-                    command = "STOP"
-                    self.clap_count = 0
-                    self.first_clap_time = None
-            else:
-                # Too long to be a clap (e.g. a scrape) -- don't count it.
-                self.clap_count = 0
-                self.first_clap_time = None
-
-        if self.clap_count > 0 and self.first_clap_time is not None:
-            if now - self.first_clap_time > CLAP_PHRASE_TIMEOUT_S:
-                self.clap_count = 0
-                self.first_clap_time = None
+                command = "STOP"
 
         return command
 
@@ -415,8 +389,8 @@ def handle_goal(state, dm, mqtt_client):
     """We (the ball) gave the special scoring command.
 
     TODO: nothing calls this yet. Every note (all 6, split between
-    FORWARD and REVERSE/LEFT/RIGHT) and 2 claps are already taken, so
-    scoring needs something else entirely -- e.g. three claps -- wired up
+    FORWARD/REVERSE/LEFT/RIGHT) and 1 clap (STOP) are already taken, so
+    scoring needs something else entirely -- e.g. two claps -- wired up
     here the way catch-detection is wired to handle_caught().
     """
     with state.lock:
@@ -652,7 +626,7 @@ def audio_worker(state, dm, _mqtt_client, pa, device_index, stop_event, force_re
             with state.lock:
                 state.refined_freq = refined_freq
                 state.committed_note = note_detector.committed_index
-                state.pending_claps = clap_detector.clap_count
+                state.clap_in_progress = clap_detector.burst_active
                 state.forward_speed = current_forward_speed
                 state.command = current_command
 
@@ -719,7 +693,7 @@ def run_display(state):
             tonal = state.tonal_detected
             note_freqs = list(state.note_freqs)
             committed_note = state.committed_note
-            pending_claps = state.pending_claps
+            clap_in_progress = state.clap_in_progress
             forward_speed = state.forward_speed
             command = state.command
             reflection = state.reflection
@@ -755,7 +729,7 @@ def run_display(state):
             f"rms:  {rms:.4f}  (floor {noise_floor:.4f})\n"
             f"peak: {refined_freq:7.1f} Hz  (coarse {peak_freq:.0f} Hz)   peakiness: {peakiness:6.1f}x\n"
             f"tonal detected: {'YES' if tonal else 'no'}   note: {note_str}\n"
-            f"claps pending: {pending_claps}  (2 claps = STOP)\n"
+            f"clap: {'in progress' if clap_in_progress else '-'}  (1 clap = STOP)\n"
             f"command: {command}\n"
             f"light sensor: {reflection}"
         )
