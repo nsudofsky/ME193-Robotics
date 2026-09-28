@@ -1,10 +1,13 @@
-# This repo only syncs the "Public stuff" folder.
+# This repo only syncs the "Public stuff" folder, plus explicit
+# exceptions below for personal assignment folders.
 # Everything else in this working directory is ignored on purpose.
 *
 !.gitignore
 !README.md
 !Public stuff/
 !Public stuff/**
+!The Whistling World Cup/
+!The Whistling World Cup/**
 
 # OS / editor junk files, ignored even inside "Public stuff"
 **/.DS_Store
