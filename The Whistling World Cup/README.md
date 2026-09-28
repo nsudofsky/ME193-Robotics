@@ -61,9 +61,10 @@ python whistling.py --role goalie    # on the goalie's laptop
 ```
 
 The first run walks you through calibration (ambient noise, then your 6
-recorder notes lowest to highest); later runs reuse it automatically (see
-[Calibration only runs once](#calibration-only-runs-once)). Both cars then
-wait for a `"start"` message on `ME193/Rogers` before driving.
+recorder notes lowest to highest — 5s to hold each note, with a 1s pause
+between so you can switch fingering); later runs reuse it automatically
+(see [Calibration only runs once](#calibration-only-runs-once)). Both cars
+then wait for a `"start"` message on `ME193/Rogers` before driving.
 
 ### Practicing before match day
 

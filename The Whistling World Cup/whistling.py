@@ -87,7 +87,8 @@ NOTE_LOW_HZ = 300
 NOTE_HIGH_HZ = 2000
 NOTE_COUNT = 6              # how many recorder notes to calibrate and recognize, lowest to highest
 NOTE_VOTE_FRAMES = 2        # consecutive frames that must agree on a note before it's committed to
-NOTE_CALIBRATION_TIMEOUT_S = 20.0  # per note, generous since finding the right fingering takes a moment
+NOTE_HOLD_S = 5.0           # how long to actively listen for each note during calibration
+NOTE_GAP_S = 1.0            # pause between notes during calibration, to switch fingering
 
 # The lowest SPEED_NOTE_COUNT notes are FORWARD speed tiers (higher note =
 # faster). Each note above that is one fixed command of its own, in order
@@ -502,20 +503,20 @@ def calibrate_noise_floor(state, stream, force=False):
     print(f"Noise floor set to {floor:.5f} (ambient mean={mean:.5f}, std={std:.5f}) -- saved for next time.")
 
 
-def _capture_one_note(state, stream, timeout_s=NOTE_CALIBRATION_TIMEOUT_S):
-    """Wait for one sustained tonal note and return its median refined
-    pitch once it ends, or None if nothing was captured before timing out.
-    Routes every frame through classify_frame() -- the same function
-    normal driving uses -- so the live plot actually moves during
+def _capture_one_note(state, stream, hold_s=NOTE_HOLD_S):
+    """Actively listen for hold_s seconds (a fixed, predictable window --
+    not "until you stop playing") and return the median refined pitch of
+    whatever tonal frames occurred during it, or None if nothing was ever
+    tonal. Routes every frame through classify_frame() -- the same
+    function normal driving uses -- so the live plot actually moves during
     calibration instead of sitting frozen while only the printed numbers
     update. Also prints a live rms/peakiness readout every ~0.5s while
-    waiting, so a silent timeout is diagnosable (too quiet vs. wrong pitch
-    range) instead of a total black box."""
+    listening, so "nothing captured" is diagnosable (too quiet vs. wrong
+    pitch range) instead of a total black box."""
     with state.lock:
         noise_floor = state.noise_floor
 
-    deadline = time.monotonic() + timeout_s
-    burst_active = False
+    deadline = time.monotonic() + hold_s
     freqs = []
     frames_since_print = 0
     print_every = max(1, int(0.5 * SAMPLE_RATE / CHUNK))  # ~every 0.5s
@@ -534,14 +535,9 @@ def _capture_one_note(state, stream, timeout_s=NOTE_CALIBRATION_TIMEOUT_S):
                   f"  tonal={'YES' if tonal else 'no'}")
 
         if tonal:
-            burst_active = True
             freqs.append(_refine_peak_freq(samples))
-        elif burst_active:
-            if freqs:
-                return float(np.median(freqs))
-            burst_active = False
 
-    return None
+    return float(np.median(freqs)) if freqs else None
 
 
 def calibrate_notes(state, stream, force=False):
@@ -555,13 +551,14 @@ def calibrate_notes(state, stream, force=False):
             return saved
 
     print(f"Now calibrating your {NOTE_COUNT} recorder notes -- play them ONE AT A TIME, lowest to highest.")
+    print(f"Each note: hold it for {NOTE_HOLD_S:.0f}s when prompted, then a {NOTE_GAP_S:.0f}s pause before the next.")
     note_freqs = []
     for i in range(NOTE_COUNT):
-        print(f"  Play note {i + 1}/{NOTE_COUNT} and hold it steady...")
+        print(f"  Play note {i + 1}/{NOTE_COUNT} now, hold it for {NOTE_HOLD_S:.0f}s...")
         freq = _capture_one_note(state, stream)
         if freq is None:
             freq = NOTE_LOW_HZ + i * (NOTE_HIGH_HZ - NOTE_LOW_HZ) / (NOTE_COUNT - 1)
-            print(f"  Didn't catch note {i + 1} in time -- using a placeholder ({freq:.0f} Hz). "
+            print(f"  Didn't catch note {i + 1} -- using a placeholder ({freq:.0f} Hz). "
                   f"Recalibrate before match day.")
         else:
             print(f"  Got note {i + 1}: {freq:.0f} Hz")
@@ -569,6 +566,9 @@ def calibrate_notes(state, stream, force=False):
                 print(f"  Warning: that's not higher than note {i} ({note_freqs[-1]:.0f} Hz) -- "
                       f"make sure you're playing lowest to highest, or speeds will be out of order.")
         note_freqs.append(freq)
+        if i < NOTE_COUNT - 1:
+            print(f"  ({NOTE_GAP_S:.0f}s pause -- get ready for the next note)")
+            time.sleep(NOTE_GAP_S)
 
     with state.lock:
         state.note_freqs = note_freqs
