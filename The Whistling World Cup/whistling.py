@@ -466,14 +466,26 @@ def calibrate_noise_floor(state, stream, force=False):
 
 def _capture_one_note(stream, noise_floor, timeout_s=NOTE_CALIBRATION_TIMEOUT_S):
     """Wait for one sustained tonal note and return its median refined
-    pitch once it ends, or None if nothing was captured before timing out."""
+    pitch once it ends, or None if nothing was captured before timing out.
+    Prints a live rms/peakiness readout every ~0.5s while waiting, so a
+    silent timeout is diagnosable (too quiet vs. wrong pitch range) instead
+    of a total black box."""
     deadline = time.monotonic() + timeout_s
     burst_active = False
     freqs = []
+    frames_since_print = 0
+    print_every = max(1, int(0.5 * SAMPLE_RATE / CHUNK))  # ~every 0.5s
     while time.monotonic() < deadline:
         raw = stream.read(CHUNK, exception_on_overflow=False)
         samples = np.frombuffer(raw, dtype=np.float32)
-        _rms, _spectrum, _peak_freq, _peakiness, tonal = _analyze_frame(samples, noise_floor)
+        rms, _spectrum, peak_freq, peakiness, tonal = _analyze_frame(samples, noise_floor)
+
+        frames_since_print += 1
+        if frames_since_print >= print_every:
+            frames_since_print = 0
+            print(f"    listening... rms={rms:.4f} (need >= {noise_floor:.4f})"
+                  f"  peak={peak_freq:.0f}Hz  peakiness={peakiness:.1f}x (need >= {PEAKINESS_MIN:.1f}x)"
+                  f"  tonal={'YES' if tonal else 'no'}")
 
         if tonal:
             burst_active = True
