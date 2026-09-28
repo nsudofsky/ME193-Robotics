@@ -74,8 +74,8 @@ MOTOR_CARD_COLOR = CARD_COLOR
 SENSOR_CARD_SERIAL = CARD_SERIAL
 SENSOR_CARD_COLOR = CARD_COLOR
 
-START_TOPIC = "ME193/Rogers"                          # instructor-assigned start trigger (do not change)
-RESULT_TOPIC = "ME193/Rogers/whistling-world-cup"      # TODO: agree on a unique subtopic with your opponent team
+START_TOPIC = "ME193/Rogers"    # instructor-assigned start trigger (do not change)
+RESULT_TOPIC = "ME193/tasha"    # agreed with Mohammed and confirmed working via mqtt_chat.py
 
 # --------------------------------------------------------------------------
 # Audio / policy configuration

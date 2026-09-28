@@ -13,7 +13,7 @@ import argparse
 
 from mqttlib import MQTTClient
 
-DEFAULT_TOPIC = "ME193/Rogers"
+DEFAULT_TOPIC = "ME193/tasha"
 
 
 def main():
