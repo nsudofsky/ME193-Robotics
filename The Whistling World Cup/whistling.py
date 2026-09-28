@@ -120,7 +120,7 @@ NOISE_FLOOR_K = 1.0        # noise floor = ambient_rms_mean + K * ambient_rms_st
                            # note from noise, so this doesn't need a big safety margin; lower
                            # further if a quiet instrument still can't clear it
 
-FORWARD_SPEED = 50          # fixed -- however many notes map to FORWARD, they all drive at this one speed
+FORWARD_SPEED = 75          # fixed -- however many notes map to FORWARD, they all drive at this one speed
 REVERSE_SPEED = 15          # fixed and deliberately slower than FORWARD -- reversing blind is riskier
 TURN_SPEED = 55             # turn speed %% for the LEFT/RIGHT rotation below
 TURN_DEGREES = 90           # LEFT/RIGHT are a bounded turn-and-stop, not a continuous spin -- this many
