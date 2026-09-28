@@ -2,25 +2,27 @@
 
 A LEGO car driven by a recorder (the instrument) and claps. `whistling.py`
 grabs a live microphone stream with `pyaudio`, listens for one of 6
-calibrated recorder notes, and maps them to 6 forward speeds:
+calibrated recorder notes, and splits them between forward-speed tiers and
+fixed commands:
 
 | Sound | Command |
 |---|---|
 | recorder note 1 (lowest) | FORWARD, slowest |
 | recorder note 2 | FORWARD, faster |
-| recorder note 3 | FORWARD, faster |
-| recorder note 4 | FORWARD, faster |
-| recorder note 5 | FORWARD, faster |
-| recorder note 6 (highest) | FORWARD, fastest |
+| recorder note 3 | FORWARD, fastest |
+| recorder note 4 | REVERSE |
+| recorder note 5 | LEFT |
+| recorder note 6 (highest) | RIGHT |
 | two claps | STOP |
 
 The 6 notes aren't hardcoded to specific frequencies — they're calibrated
 to *your* recorder at startup (play each one, lowest to highest, when
 prompted), since the exact pitch depends on the instrument and fingering.
-REVERSE and turning (LEFT/RIGHT) aren't wired up yet; the plan is to get
-FORWARD/STOP solid first and pick those once this is confirmed working.
-On match day the car is also assigned a role — **ball** or **goalie** —
-and the two cars coordinate the match over MQTT.
+Which notes are speed tiers vs. fixed commands, and which fixed command
+each one maps to, is controlled by `SPEED_NOTE_COUNT`/`NOTE_COMMANDS` near
+the top of `whistling.py` — easy to change without touching the
+calibration flow itself. On match day the car is also assigned a role —
+**ball** or **goalie** — and the two cars coordinate the match over MQTT.
 
 ## Files
 
@@ -88,7 +90,7 @@ a *percussive* one (a clap)? Those two can't both be true at once
 (tonal = narrowband, percussive = broadband), so notes and claps never
 compete over the same sound.
 
-**A note decides FORWARD's speed.** Rather than hardcoding frequencies,
+**A note decides the command.** Rather than hardcoding frequencies,
 `calibrate_notes()` asks you to play your 6 notes once, lowest to
 highest, and records each one's pitch. At runtime, whichever calibrated
 note the current pitch is nearest to becomes the *committed* note once 2
@@ -96,9 +98,12 @@ consecutive frames agree on it (`NoteDetector`) — this debounces one-off
 noisy frames without adding much lag. A pitch too far from every
 calibrated note (more than half the smallest gap between two adjacent
 notes) doesn't match anything and is dropped, rather than guessed at.
-Note `i` (0-indexed internally, 1-indexed in all the printed/on-screen
-output) maps linearly to a forward speed between `MIN_FORWARD_SPEED` and
-`MAX_FORWARD_SPEED` — note 1 is slowest, note 6 is fastest.
+`command_for_note()` then splits the 6 committed note indices: the lowest
+`SPEED_NOTE_COUNT` (3) are all FORWARD, with the speed itself scaled
+linearly between `MIN_FORWARD_SPEED` and `MAX_FORWARD_SPEED` by note
+index; each note above that is one fixed command from `NOTE_COMMANDS`
+(REVERSE, then LEFT, then RIGHT) at a fixed speed, since there's no
+continuous signal to scale a single note by.
 
 Pitch estimation for this actually runs at **two different resolutions**
 for two different jobs. A coarser, Welch-averaged spectrum (see the noise
@@ -117,15 +122,15 @@ STOP immediately on the second one. A single clap not followed by a
 second within 0.5s is simply forgotten — there's no other meaning for
 one clap.
 
-Both outcomes *latch* — the car keeps executing the current one (issued
+All outcomes *latch* — the car keeps executing the current one (issued
 to the LEGO hub over Bluetooth at most every 100 ms) until a new one
 fires. You don't have to keep playing a note or keep clapping to keep the
 car moving.
 
 Catching an opponent (light sensor) and scoring a goal (a dedicated
 command, not implemented yet — see the `TODO` on `handle_goal()` in
-`whistling.py`) are both handled outside this policy entirely, as is
-REVERSE/turning (not implemented yet either — see the module docstring).
+`whistling.py`, since every note and both claps are now taken) are both
+handled outside this policy entirely.
 
 ### What does your code do if no sound is detected?
 
@@ -299,13 +304,11 @@ something about what's actually reliable with real hardware and a real
 
 ## Known limitations / TODO
 
-- **Reverse and turning aren't wired up yet.** Deliberately deferred
-  until FORWARD/STOP are confirmed solid on hardware — see the module
-  docstring and the TODO comment in `apply_command()`.
-- **Scoring a goal isn't wired up yet either.** `handle_goal()` still
-  exists (stops the car, publishes `"goal:<role>"`, plays the success
-  song) but nothing calls it yet — needs its own pattern, decided once
-  reverse/turning are too.
+- **Scoring a goal isn't wired up yet.** `handle_goal()` still exists
+  (stops the car, publishes `"goal:<role>"`, plays the success song) but
+  nothing calls it yet — every note (all 6, split between FORWARD's
+  speed tiers and REVERSE/LEFT/RIGHT) and 2 claps are already taken, so
+  scoring needs something else entirely, e.g. three claps.
 - **Note-onset transients are an untested edge case.** The very start of
   a note (breath attack before the tone stabilizes) is briefly
   broadband, in principle close to what a clap looks like.
@@ -331,3 +334,14 @@ something about what's actually reliable with real hardware and a real
   notes map to) are starting guesses — recalibrate/retune them against
   your actual color sensor and how fast you want the slowest/fastest note
   to drive.
+- **Fixed:** the live plot used to sit frozen during both calibration
+  steps (only the printed terminal numbers updated) because calibration
+  read raw audio directly instead of going through `classify_frame()`
+  (the function that also updates the shared state the plot reads from).
+  Both calibration steps now route through it, so the waveform/spectrum
+  move during calibration too, not just once normal driving starts.
+- If you want an independent sanity check of what your recorder's notes
+  actually measure at, a standalone scrolling spectrogram (`spectogram.py`,
+  using `sounddevice` instead of `pyaudio`) is a handy second opinion —
+  play your 6 notes at it and watch where the bright band lands on the
+  frequency axis to confirm they're inside `NOTE_LOW_HZ`-`NOTE_HIGH_HZ`.

@@ -5,18 +5,23 @@ The Whistling World Cup
 Sound-controlled LEGO car. A live microphone feed (captured with pyaudio)
 drives the car using a recorder (the instrument) and claps:
 
-    one of 6 calibrated recorder notes, lowest to highest -> FORWARD,
-        at one of 6 speed levels (higher note = faster)
-    two claps -> STOP
+    note 1 (lowest)   -> FORWARD, slowest
+    note 2            -> FORWARD, faster
+    note 3            -> FORWARD, fastest
+    note 4            -> REVERSE
+    note 5            -> LEFT
+    note 6 (highest)  -> RIGHT
+    two claps         -> STOP
 
 The 6 notes are whatever your recorder actually produces -- calibrated to
 your instrument at startup rather than hardcoded, since exact pitches vary
 by instrument and fingering. Both the noise floor and the note
 calibration are saved to disk after the first run and reused on every run
 after that, so you don't have to redo that setup every time (see
---recalibrate). REVERSE and turning (LEFT/RIGHT) aren't wired up yet --
-see the TODOs -- the plan is to get FORWARD/STOP solid first and decide
-those once this is working.
+--recalibrate). SPEED_NOTE_COUNT and NOTE_COMMANDS (near the top of the
+file) are what actually control this split -- change them if you want a
+different number of speed tiers or a different order for REVERSE/LEFT/
+RIGHT.
 
 On match day the car is also assigned a role -- "ball" or "goalie" -- and
 the two cars coordinate the match over MQTT (start trigger, catch/goal
@@ -80,9 +85,18 @@ PREFERRED_MIC_NAME_CONTAINS = "airpods"  # case-insensitive substring match for 
 # instrument's actual range falls outside it.
 NOTE_LOW_HZ = 300
 NOTE_HIGH_HZ = 2000
-NOTE_COUNT = 6              # how many recorder notes to calibrate and recognize
+NOTE_COUNT = 6              # how many recorder notes to calibrate and recognize, lowest to highest
 NOTE_VOTE_FRAMES = 2        # consecutive frames that must agree on a note before it's committed to
 NOTE_CALIBRATION_TIMEOUT_S = 20.0  # per note, generous since finding the right fingering takes a moment
+
+# The lowest SPEED_NOTE_COUNT notes are FORWARD speed tiers (higher note =
+# faster). Each note above that is one fixed command of its own, in order
+# -- so with NOTE_COUNT=6 and SPEED_NOTE_COUNT=3, notes 4/5/6 are REVERSE/
+# LEFT/RIGHT. NOTE_COMMANDS is what actually maps the "extra" notes; edit
+# it (not the number 3 alone) if you want a different order or fewer of
+# them wired up.
+SPEED_NOTE_COUNT = 3
+NOTE_COMMANDS = ["REVERSE", "LEFT", "RIGHT"]  # for notes SPEED_NOTE_COUNT, SPEED_NOTE_COUNT+1, ...
 
 # A single periodogram (one FFT of one chunk) of pure broadband noise is
 # naturally spiky -- each bin's magnitude has high variance even though no
@@ -104,7 +118,9 @@ PEAKINESS_MIN = 6.0        # peak power must be >= this many x the in-band media
 CALIBRATION_S = 1.5        # seconds of ambient noise sampled at startup to set the noise floor
 NOISE_FLOOR_K = 4.0        # noise floor = ambient_rms_mean + K * ambient_rms_std
 
-MIN_FORWARD_SPEED, MAX_FORWARD_SPEED = 30, 90  # note 1 (lowest) -> MIN, note 6 (highest) -> MAX
+MIN_FORWARD_SPEED, MAX_FORWARD_SPEED = 30, 90  # note 1 (lowest) -> MIN, note SPEED_NOTE_COUNT -> MAX
+REVERSE_SPEED = 45          # fixed -- REVERSE is one note, not a range, so there's no pitch to vary it by
+TURN_SPEED = 55             # fixed tank-turn speed %% for LEFT/RIGHT, same reasoning
 
 # Claps: STOP. A clap is loud and broadband -- the opposite of a recorder
 # note's narrowband pitch -- so it's never confused with a note no matter
@@ -255,10 +271,24 @@ def is_percussive(rms, tonal, noise_floor):
 # --------------------------------------------------------------------------
 
 def forward_speed_for_note(index):
-    if NOTE_COUNT <= 1:
+    """index must be < SPEED_NOTE_COUNT -- one of the FORWARD speed tiers."""
+    if SPEED_NOTE_COUNT <= 1:
         return MAX_FORWARD_SPEED
-    frac = index / (NOTE_COUNT - 1)
+    frac = index / (SPEED_NOTE_COUNT - 1)
     return MIN_FORWARD_SPEED + frac * (MAX_FORWARD_SPEED - MIN_FORWARD_SPEED)
+
+
+def command_for_note(index):
+    """Maps a committed note index (0-based, lowest to highest) to a
+    command. The lowest SPEED_NOTE_COUNT notes are all "FORWARD" (their
+    speed comes from forward_speed_for_note separately); each note after
+    that is one fixed command of its own, per NOTE_COMMANDS. Returns None
+    for a note index beyond both groups (only possible if NOTE_COUNT is
+    larger than SPEED_NOTE_COUNT + len(NOTE_COMMANDS))."""
+    if index < SPEED_NOTE_COUNT:
+        return "FORWARD"
+    extra = index - SPEED_NOTE_COUNT
+    return NOTE_COMMANDS[extra] if extra < len(NOTE_COMMANDS) else None
 
 
 class NoteDetector:
@@ -343,9 +373,12 @@ def apply_command(dm, command, forward_speed):
         dm.movement_move_tank(0, 0)
     elif command == "FORWARD":
         dm.movement_move_tank(forward_speed, forward_speed)
-    # TODO (reverse/turning): not decided yet -- see the module docstring.
-    # This is where a "REVERSE"/"LEFT"/"RIGHT" branch would go once we know
-    # what should trigger them.
+    elif command == "REVERSE":
+        dm.movement_move_tank(-REVERSE_SPEED, -REVERSE_SPEED)
+    elif command == "LEFT":
+        dm.movement_move_tank(-TURN_SPEED, TURN_SPEED)
+    elif command == "RIGHT":
+        dm.movement_move_tank(TURN_SPEED, -TURN_SPEED)
 
 
 # --------------------------------------------------------------------------
@@ -375,9 +408,10 @@ def handle_caught(state, dm, mqtt_client):
 def handle_goal(state, dm, mqtt_client):
     """We (the ball) gave the special scoring command.
 
-    TODO: nothing calls this yet -- needs its own distinct pattern, picked
-    once reverse/turning are also decided, then wired up here the way
-    catch-detection is wired to handle_caught().
+    TODO: nothing calls this yet. Every note (all 6, split between
+    FORWARD's speed tiers and REVERSE/LEFT/RIGHT) and 2 claps are already
+    taken, so scoring needs something else entirely -- e.g. three claps --
+    wired up here the way catch-detection is wired to handle_caught().
     """
     with state.lock:
         if state.game_over:
@@ -455,7 +489,11 @@ def calibrate_noise_floor(state, stream, force=False):
     for _ in range(n_frames):
         raw = stream.read(CHUNK, exception_on_overflow=False)
         samples = np.frombuffer(raw, dtype=np.float32)
-        rms_samples.append(float(np.sqrt(np.mean(samples ** 2))))
+        rms = float(np.sqrt(np.mean(samples ** 2)))
+        rms_samples.append(rms)
+        with state.lock:  # so the waveform panel moves during this step too, not just after
+            state.samples = samples
+            state.rms = rms
     mean, std = float(np.mean(rms_samples)), float(np.std(rms_samples))
     floor = mean + NOISE_FLOOR_K * std
     with state.lock:
@@ -464,12 +502,18 @@ def calibrate_noise_floor(state, stream, force=False):
     print(f"Noise floor set to {floor:.5f} (ambient mean={mean:.5f}, std={std:.5f}) -- saved for next time.")
 
 
-def _capture_one_note(stream, noise_floor, timeout_s=NOTE_CALIBRATION_TIMEOUT_S):
+def _capture_one_note(state, stream, timeout_s=NOTE_CALIBRATION_TIMEOUT_S):
     """Wait for one sustained tonal note and return its median refined
     pitch once it ends, or None if nothing was captured before timing out.
-    Prints a live rms/peakiness readout every ~0.5s while waiting, so a
-    silent timeout is diagnosable (too quiet vs. wrong pitch range) instead
-    of a total black box."""
+    Routes every frame through classify_frame() -- the same function
+    normal driving uses -- so the live plot actually moves during
+    calibration instead of sitting frozen while only the printed numbers
+    update. Also prints a live rms/peakiness readout every ~0.5s while
+    waiting, so a silent timeout is diagnosable (too quiet vs. wrong pitch
+    range) instead of a total black box."""
+    with state.lock:
+        noise_floor = state.noise_floor
+
     deadline = time.monotonic() + timeout_s
     burst_active = False
     freqs = []
@@ -478,7 +522,9 @@ def _capture_one_note(stream, noise_floor, timeout_s=NOTE_CALIBRATION_TIMEOUT_S)
     while time.monotonic() < deadline:
         raw = stream.read(CHUNK, exception_on_overflow=False)
         samples = np.frombuffer(raw, dtype=np.float32)
-        rms, _spectrum, peak_freq, peakiness, tonal = _analyze_frame(samples, noise_floor)
+        peak_freq, tonal, rms, _spectrum = classify_frame(state, samples)
+        with state.lock:
+            peakiness = state.peakiness
 
         frames_since_print += 1
         if frames_since_print >= print_every:
@@ -508,14 +554,11 @@ def calibrate_notes(state, stream, force=False):
                 state.note_freqs = saved
             return saved
 
-    with state.lock:
-        noise_floor = state.noise_floor
-
     print(f"Now calibrating your {NOTE_COUNT} recorder notes -- play them ONE AT A TIME, lowest to highest.")
     note_freqs = []
     for i in range(NOTE_COUNT):
         print(f"  Play note {i + 1}/{NOTE_COUNT} and hold it steady...")
-        freq = _capture_one_note(stream, noise_floor)
+        freq = _capture_one_note(state, stream)
         if freq is None:
             freq = NOTE_LOW_HZ + i * (NOTE_HIGH_HZ - NOTE_LOW_HZ) / (NOTE_COUNT - 1)
             print(f"  Didn't catch note {i + 1} in time -- using a placeholder ({freq:.0f} Hz). "
@@ -564,10 +607,15 @@ def audio_worker(state, dm, _mqtt_client, pa, device_index, stop_event, force_re
             refined_freq = _refine_peak_freq(samples) if tonal else 0.0
             newly_committed = note_detector.update(tonal, refined_freq)
             if newly_committed is not None:
-                current_command = "FORWARD"
-                current_forward_speed = forward_speed_for_note(newly_committed)
-                print(f"note {newly_committed + 1}/{NOTE_COUNT} ({refined_freq:.0f} Hz) "
-                      f"-> FORWARD @ {current_forward_speed:.0f}%")
+                resolved = command_for_note(newly_committed)
+                if resolved == "FORWARD":
+                    current_command = "FORWARD"
+                    current_forward_speed = forward_speed_for_note(newly_committed)
+                    print(f"note {newly_committed + 1}/{NOTE_COUNT} ({refined_freq:.0f} Hz) "
+                          f"-> FORWARD @ {current_forward_speed:.0f}%")
+                elif resolved is not None:
+                    current_command = resolved
+                    print(f"note {newly_committed + 1}/{NOTE_COUNT} ({refined_freq:.0f} Hz) -> {current_command}")
 
             percussive = is_percussive(rms, tonal, noise_floor)
             clap_command = clap_detector.update(now, percussive)
@@ -672,13 +720,17 @@ def run_display(state):
         else:
             peak_marker.set_data([], [])
 
-        note_str = f"{committed_note + 1}/{NOTE_COUNT}" if committed_note is not None else "-"
+        if committed_note is not None:
+            meaning = command_for_note(committed_note)
+            meaning = f"FORWARD @ {forward_speed:.0f}%" if meaning == "FORWARD" else meaning
+            note_str = f"{committed_note + 1}/{NOTE_COUNT} -> {meaning}"
+        else:
+            note_str = "-"
         status = (
             f"role: {role:<7} match: {'LIVE' if start_received else 'waiting for start'}\n"
             f"rms:  {rms:.4f}  (floor {noise_floor:.4f})\n"
             f"peak: {refined_freq:7.1f} Hz  (coarse {peak_freq:.0f} Hz)   peakiness: {peakiness:6.1f}x\n"
             f"tonal detected: {'YES' if tonal else 'no'}   note: {note_str}\n"
-            f"forward speed: {forward_speed:.0f}%\n"
             f"claps pending: {pending_claps}  (2 claps = STOP)\n"
             f"command: {command}\n"
             f"light sensor: {reflection}"
