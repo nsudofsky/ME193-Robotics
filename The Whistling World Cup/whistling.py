@@ -149,7 +149,7 @@ PERCUSSIVE_MAX_S = 0.25       # a broadband burst longer than this isn't a clap 
 
 COMMAND_PERIOD_S = 0.1     # minimum time between motor commands sent over Bluetooth
 
-CATCH_REFLECTION = 200     # colorSensor.reflection() at/above this = something is right up on the sensor
+CATCH_REFLECTION = 80      # colorSensor.reflection() at/above this = something is right up on the sensor
 CATCH_HOLD_FRAMES = 3      # consecutive high readings required before declaring a catch
 
 # The noise floor and the 6 recorder notes are saved here after the first
