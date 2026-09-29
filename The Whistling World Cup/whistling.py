@@ -482,6 +482,24 @@ def _save_calibration(**updates):
         print(f"  (could not save calibration for next time: {exc})")
 
 
+def _safe_read(stream, chunk_size):
+    """Read one chunk, returning silence instead of crashing the whole
+    match if the underlying audio stream hiccups. Observed in practice:
+    a Bluetooth mic (AirPods) can drop out mid-stream for a moment,
+    which PortAudio surfaces as an OSError -- previously uncaught, which
+    took down the entire calibration/audio_worker thread over a single
+    transient glitch. Treating that one bad frame as silence lets
+    everything downstream (noise gates, note/clap detection) handle it
+    the same way it already handles a quiet moment, and the stream
+    keeps running for the next frame."""
+    try:
+        raw = stream.read(chunk_size, exception_on_overflow=False)
+        return np.frombuffer(raw, dtype=np.float32)
+    except OSError as exc:
+        print(f"  (audio read glitch, treating this frame as silence: {exc})")
+        return np.zeros(chunk_size, dtype=np.float32)
+
+
 def calibrate_noise_floor(state, stream, force=False):
     if not force:
         saved = _load_calibration().get("noise_floor")
@@ -495,8 +513,7 @@ def calibrate_noise_floor(state, stream, force=False):
     n_frames = max(1, int(CALIBRATION_S * SAMPLE_RATE / CHUNK))
     rms_samples = []
     for _ in range(n_frames):
-        raw = stream.read(CHUNK, exception_on_overflow=False)
-        samples = np.frombuffer(raw, dtype=np.float32)
+        samples = _safe_read(stream, CHUNK)
         rms = float(np.sqrt(np.mean(samples ** 2)))
         rms_samples.append(rms)
         with state.lock:  # so the waveform panel moves during this step too, not just after
@@ -528,8 +545,7 @@ def _capture_one_note(state, stream, hold_s=NOTE_HOLD_S):
     frames_since_print = 0
     print_every = max(1, int(0.5 * SAMPLE_RATE / CHUNK))  # ~every 0.5s
     while time.monotonic() < deadline:
-        raw = stream.read(CHUNK, exception_on_overflow=False)
-        samples = np.frombuffer(raw, dtype=np.float32)
+        samples = _safe_read(stream, CHUNK)
         peak_freq, tonal, rms, _spectrum = classify_frame(state, samples)
         with state.lock:
             peakiness = state.peakiness
@@ -605,8 +621,7 @@ def audio_worker(state, dm, mqtt_client, pa, device_index, stop_event, force_rec
         right_tap_times = deque()  # for the ball's "3 right turns in a row" goal signal
 
         while not stop_event.is_set():
-            raw = stream.read(CHUNK, exception_on_overflow=False)
-            samples = np.frombuffer(raw, dtype=np.float32)
+            samples = _safe_read(stream, CHUNK)
             _coarse_peak_freq, tonal, rms, _spectrum = classify_frame(state, samples)
             now = time.monotonic()
 
@@ -674,8 +689,19 @@ def audio_worker(state, dm, mqtt_client, pa, device_index, stop_event, force_rec
                 apply_command(dm, current_command, current_forward_speed)
                 last_command_time = now
     finally:
-        stream.stop_stream()
-        stream.close()
+        # If the stream already died (see _safe_read), stopping/closing it
+        # can itself raise -- this is exactly what crashed the whole
+        # session before: a real error upstream, then the cleanup here
+        # throwing a second time on top of it. Don't let cleanup be what
+        # takes the process down.
+        try:
+            stream.stop_stream()
+        except OSError as exc:
+            print(f"  (stream already broken during shutdown, ignoring: {exc})")
+        try:
+            stream.close()
+        except OSError:
+            pass
 
 
 def sensor_worker(state, cs, dm, mqtt_client, stop_event):
